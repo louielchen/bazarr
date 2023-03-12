@@ -6,6 +6,10 @@ import os
 import zipfile
 import re
 import copy
+from PIL import Image
+from numpy import asarray
+import base64
+import easyocr
 
 try:
     from urlparse import urljoin
@@ -35,9 +39,11 @@ from subliminal.video import Episode, Movie
 
 logger = logging.getLogger(__name__)
 
-language_converters.register('zimuku = subliminal_patch.converters.zimuku:zimukuConverter')
+language_converters.register(
+    'zimuku = subliminal_patch.converters.zimuku:zimukuConverter')
 
 supported_languages = list(language_converters['zimuku'].to_zimuku.keys())
+
 
 class ZimukuSubtitle(Subtitle):
     """Zimuku Subtitle."""
@@ -75,7 +81,8 @@ class ZimukuSubtitle(Subtitle):
         # movie
         elif isinstance(video, Movie):
             # other properties
-            matches |= guess_matches(video, guessit(self.version, {"type": "movie"}))
+            matches |= guess_matches(video, guessit(
+                self.version, {"type": "movie"}))
 
         return matches
 
@@ -87,9 +94,9 @@ class ZimukuProvider(Provider):
     video_types = (Episode, Movie)
     logger.info(str(supported_languages))
 
-    server_url = "http://zimuku.org"
-    search_url = "/search?q={}&security_verify_data={}"
-    download_url = "http://zimuku.org/"
+    server_url = "https://zimuku.org"
+    search_url = "/search?q={}"
+    download_url = "https://zimuku.org/"
 
     subtitle_class = ZimukuSubtitle
 
@@ -101,31 +108,40 @@ class ZimukuProvider(Provider):
         for i in s:
             val += hex(ord(i))[2:]
         return val
-    vertoken = ""
-    location_re = re.compile(
-        r'self\.location = "(.*)" \+ stringToHex\(screendate\)')
 
     def yunsuo_bypass(self, url, *args, **kwargs):
-        i = -1
-        while True:
-            i += 1
+        reader = easyocr.Reader(['en'])
+        image_re = re.compile(
+            r'"data:image/bmp;base64,(.*)"/>'
+        )
+        for i in range(10):
             r = self.session.get(url, *args, **kwargs)
-            if(r.status_code == 404):
-                tr = self.location_re.findall(r.text)
-                self.session.cookies.set("srcurl", self.stringToHex(r.url))
-                if(tr):
-                    verify_resp = self.session.get(
-                        self.server_url+tr[0]+self.stringToHex("1920,1080"), allow_redirects=False)
-                    if(verify_resp.status_code == 302 and self.session.cookies.get("security_session_verify") != None):
-                        pass
+            if (r.status_code == 404):
+                token_image = image_re.findall(r.text)
+                verify_img = Image.open(
+                    io.BytesIO(base64.decodebytes(bytes(token_image[0], "utf-8"))))
+                verify_img.convert("RGB")
+                ocr_result = reader.readtext(
+                    asarray(verify_img), allowlist="123456789")
+                token = ""
+                if len(ocr_result) == 1:
+                    token = ocr_result[0][-2].replace(" ", "")
+                if len(token) != 5:
                     continue
-            if len(self.location_re.findall(r.text)) == 0:
-                self.vertoken = self.stringToHex("1920,1080")
-                return r
+                self.session.cookies.set(
+                    "srcurl", self.stringToHex(r.url) + ";path=/;")
+                verify_resp = self.session.get(
+                    r.url + "&security_verify_img="+self.stringToHex(token), allow_redirects=False)
+                if (verify_resp.status_code == 302 and self.session.cookies.get("security_session_verify") != None):
+                    break
+        retval = self.session.get(url, allow_redirects=True)
+        logger.debug("yunsuo_bypass ret: " + retval.status_code)
+        return retval
 
     def initialize(self):
         self.session = Session()
-        self.session.headers["User-Agent"] = AGENT_LIST[randint(0, len(AGENT_LIST) - 1)]
+        self.session.headers["User-Agent"] = AGENT_LIST[randint(
+            0, len(AGENT_LIST) - 1)]
 
     def terminate(self):
         self.session.close()
@@ -135,7 +151,8 @@ class ZimukuProvider(Provider):
         bs_obj = ParserBeautifulSoup(
             r.content.decode("utf-8", "ignore"), ["html.parser"]
         )
-        subs_body = bs_obj.find("div", class_="subs box clearfix").find("tbody")
+        subs_body = bs_obj.find(
+            "div", class_="subs box clearfix").find("tbody")
         subs = []
         for sub in subs_body.find_all("tr"):
             a = sub.find("a")
@@ -165,14 +182,13 @@ class ZimukuProvider(Provider):
             backup_session.headers["Referer"] = link
 
             subs.append(
-                self.subtitle_class(language, sub_page_link, name, backup_session, year)
+                self.subtitle_class(language, sub_page_link,
+                                    name, backup_session, year)
             )
 
         return subs
 
     def query(self, keyword, season=None, episode=None, year=None):
-        if self.vertoken == "":
-            self.yunsuo_bypass(self.server_url + '/')
         params = keyword
         if season:
             params += ".S{season:02d}".format(season=season)
@@ -181,8 +197,9 @@ class ZimukuProvider(Provider):
 
         logger.debug("Searching subtitles %r", params)
         subtitles = []
-        search_link = self.server_url + text_type(self.search_url).format(params, self.vertoken)
-        
+        search_link = self.server_url + \
+            text_type(self.search_url).format(params)
+
         r = self.yunsuo_bypass(search_link, timeout=30)
         r.raise_for_status()
 
@@ -215,7 +232,8 @@ class ZimukuProvider(Provider):
                 subs_year = year
                 if season:
                     # episode year in zimuku is the season's year not show's year
-                    actual_subs_year = re.findall(r"\d{4}", title_a.text) or None
+                    actual_subs_year = re.findall(
+                        r"\d{4}", title_a.text) or None
                     if actual_subs_year:
                         subs_year = int(actual_subs_year[0]) - season + 1
                     title = title_a.text
@@ -286,17 +304,21 @@ class ZimukuProvider(Provider):
         # download the subtitle
         logger.info("Downloading subtitle %r", subtitle)
         self.session = subtitle.session
-        download_link = _get_archive_dowload_link(self.yunsuo_bypass, subtitle.page_link)
-        r = self.yunsuo_bypass(download_link, headers={'Referer': subtitle.page_link}, timeout=30)
+        download_link = _get_archive_dowload_link(
+            self.yunsuo_bypass, subtitle.page_link)
+        r = self.yunsuo_bypass(download_link, headers={
+                               'Referer': subtitle.page_link}, timeout=30)
         r.raise_for_status()
         try:
             filename = r.headers["Content-Disposition"]
         except KeyError:
-            logger.debug("Unable to parse subtitles filename. Dropping this subtitles.")
+            logger.debug(
+                "Unable to parse subtitles filename. Dropping this subtitles.")
             return
 
         if not r.content:
-            logger.debug("Unable to download subtitle. No data returned from provider")
+            logger.debug(
+                "Unable to download subtitle. No data returned from provider")
             return
 
         archive_stream = io.BytesIO(r.content)
@@ -305,7 +327,8 @@ class ZimukuProvider(Provider):
             logger.debug("Identified rar archive")
             if ".rar" not in filename:
                 logger.debug(
-                    ".rar should be in the downloaded file name: {}".format(filename)
+                    ".rar should be in the downloaded file name: {}".format(
+                        filename)
                 )
                 return
             archive = rarfile.RarFile(archive_stream)
@@ -314,7 +337,8 @@ class ZimukuProvider(Provider):
             logger.debug("Identified zip archive")
             if ".zip" not in filename:
                 logger.debug(
-                    ".zip should be in the downloaded file name: {}".format(filename)
+                    ".zip should be in the downloaded file name: {}".format(
+                        filename)
                 )
                 return
             archive = zipfile.ZipFile(archive_stream)
@@ -327,7 +351,8 @@ class ZimukuProvider(Provider):
                     break
             if not is_sub:
                 logger.debug(
-                    "unknown subtitle ext int downloaded file name: {}".format(filename)
+                    "unknown subtitle ext int downloaded file name: {}".format(
+                        filename)
                 )
                 return
             logger.debug("Identified {} file".format(is_sub))
@@ -404,7 +429,7 @@ def _extract_name(name):
                 result = [start, end]
             start = end
             end += 1
-        new_name = name[result[0] : result[1]]
+        new_name = name[result[0]: result[1]]
     new_name = new_name.strip() + suffix
     return new_name
 
