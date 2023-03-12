@@ -9,7 +9,7 @@ import copy
 from PIL import Image
 from numpy import asarray
 import base64
-import easyocr
+import pytesseract
 
 try:
     from urlparse import urljoin
@@ -110,7 +110,6 @@ class ZimukuProvider(Provider):
         return val
 
     def yunsuo_bypass(self, url, *args, **kwargs):
-        reader = easyocr.Reader(['en'])
         image_re = re.compile(
             r'"data:image/bmp;base64,(.*)"/>'
         )
@@ -121,11 +120,10 @@ class ZimukuProvider(Provider):
                 verify_img = Image.open(
                     io.BytesIO(base64.decodebytes(bytes(token_image[0], "utf-8"))))
                 verify_img.convert("RGB")
-                ocr_result = reader.readtext(
-                    asarray(verify_img), allowlist="123456789")
-                token = ""
-                if len(ocr_result) == 1:
-                    token = ocr_result[0][-2].replace(" ", "")
+                custom_oem_psm_config = r'--oem 1 --psm 7 -c tessedit_char_whitelist="0123456789"'
+                ocr_result = pytesseract.image_to_string(
+                    verify_img, config=custom_oem_psm_config)
+                token = ocr_result.strip()
                 if len(token) != 5:
                     continue
                 self.session.cookies.set(
@@ -135,7 +133,7 @@ class ZimukuProvider(Provider):
                 if (verify_resp.status_code == 302 and self.session.cookies.get("security_session_verify") != None):
                     break
         retval = self.session.get(url, allow_redirects=True)
-        logger.debug("yunsuo_bypass ret: " + retval.status_code)
+        logger.debug("yunsuo_bypass ret: {}".format(retval.status_code))
         return retval
 
     def initialize(self):
